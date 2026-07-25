@@ -31,28 +31,25 @@ const initialEdges: Edge[] = [
   { id: 'e3-4', source: '3', target: '4' },
   { id: 'e4-5', source: '4', target: '5' },
 ];
+
 // Initialize the layout engine
 const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
 
 // The function that calculates perfect coordinates
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => {
-  dagreGraph.setGraph({ rankdir: direction }); // 'TB' = Top to Bottom
+  dagreGraph.setGraph({ rankdir: direction });
 
-  // Feed the nodes to Dagre with estimated width/height
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: 175, height: 50 });
   });
 
-  // Feed the connections to Dagre
   edges.forEach((edge) => {
     dagreGraph.setEdge(edge.source, edge.target);
   });
 
-  // Run the math!
   dagre.layout(dagreGraph);
 
-  // Apply the new calculated X/Y coordinates back to React Flow's nodes
   const layoutedNodes = nodes.map((node) => {
     const nodeWithPosition = dagreGraph.node(node.id);
     return {
@@ -66,37 +63,45 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'TB') => 
 
   return { nodes: layoutedNodes, edges };
 };
+
 export default function App() {
-  // State for React Flow nodes and edges
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [edges, setEdges] = useState<Edge[]>(initialEdges);
 
-  // State for the search bar and loading status
   const [repoUrl, setRepoUrl] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  // Handlers for React Flow interactivity (dragging, connecting)
+  // Phase 2: State for the Code Inspector Panel
+  const [selectedNode, setSelectedNode] = useState<Node | null>(null);
+
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => setNodes((nds) => applyNodeChanges(changes, nds)),
     []
   );
+  
   const onEdgesChange = useCallback(
     (changes: EdgeChange[]) => setEdges((eds) => applyEdgeChanges(changes, eds)),
     []
   );
+  
   const onConnect = useCallback(
     (params: Connection) => setEdges((eds) => addEdge(params, eds)),
     []
   );
 
-  // Function to send the URL to your FastAPI backend
+  // Phase 2: Handle click event to populate the sidebar
+  const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
+    setSelectedNode(node);
+  }, []);
+
   const handleAnalyze = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!repoUrl) return;
 
     setIsLoading(true);
+    setSelectedNode(null); // Close sidebar on new analysis
+    
     try {
-      // Pointing to your local FastAPI server
       const response = await fetch('http://localhost:8000/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -109,15 +114,10 @@ export default function App() {
 
       const data = await response.json();
 
-      // --- NEW: Run the backend data through the layout engine ---
-      const { nodes: layoutedNodes, edges: layoutedEdges } = getLayoutedElements(
-        data.nodes,
-        data.edges
-      );
-
-      // Overwrite the graph with perfectly positioned data
-      setNodes(layoutedNodes);
-      setEdges(layoutedEdges);
+      // We skip dagre layout for the backend data here because Phase 3 sets absolute 
+      // X/Y coordinates to group the nested file/function architectural boxes.
+      setNodes(data.nodes);
+      setEdges(data.edges);
     } catch (error) {
       console.error('Failed to analyze repository:', error);
       alert('Failed to analyze the repository. Check the console for details.');
@@ -127,11 +127,10 @@ export default function App() {
   };
 
   return (
-    // Full screen container with inline styles ensuring height/width
-    <div className="w-screen h-screen bg-slate-50" style={{ width: '100vw', height: '100vh' }}>
+    <div className="w-screen h-screen bg-slate-50 flex flex-col" style={{ width: '100vw', height: '100vh' }}>
       
       {/* Navbar with Search Form */}
-      <header className="absolute top-0 left-0 w-full p-4 bg-white shadow-sm z-10 flex justify-between items-center border-b border-slate-200">
+      <header className="h-16 w-full px-4 bg-white shadow-sm flex justify-between items-center border-b border-slate-200 shrink-0">
         <h1 className="text-xl font-bold text-slate-800">Repo Analyzer MVP</h1>
 
         <form onSubmit={handleAnalyze} className="flex gap-2 w-1/3 min-w-[300px]">
@@ -153,19 +152,51 @@ export default function App() {
         </form>
       </header>
 
-      {/* React Flow Canvas */}
-      <div className="w-full h-full pt-16" style={{ width: '100%', height: '100%' }}>
-        <ReactFlow
-          nodes={nodes}
-          edges={edges}
-          onNodesChange={onNodesChange}
-          onEdgesChange={onEdgesChange}
-          onConnect={onConnect}
-          fitView
-        >
-          <Background color="#ccc" gap={16} />
-          <Controls />
-        </ReactFlow>
+      {/* Main Content Area */}
+      <div className="flex-1 w-full flex overflow-hidden relative">
+        
+        {/* React Flow Canvas */}
+        <div className={`${selectedNode ? 'w-2/3' : 'w-full'} h-full transition-all duration-300 ease-in-out`}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodeClick={onNodeClick} // Attaching the Phase 2 click listener
+            fitView
+          >
+            <Background color="#ccc" gap={16} />
+            <Controls />
+          </ReactFlow>
+        </div>
+
+        {/* Phase 2: Interactive Code Inspector Sidebar */}
+        {selectedNode && (
+          <div className="w-1/3 h-full bg-[#1e1e1e] text-[#d4d4d4] flex flex-col border-l border-slate-300 shadow-2xl z-10 shrink-0">
+            {/* Sidebar Header */}
+            <div className="p-4 border-b border-[#333] flex justify-between items-center bg-[#252526]">
+              <h3 className="text-sm font-bold text-white m-0 truncate pr-4">
+                {String(selectedNode.data.label)}
+              </h3>
+              <button 
+                onClick={() => setSelectedNode(null)} 
+                className="text-gray-400 hover:text-white cursor-pointer focus:outline-none"
+              >
+                ✕
+              </button>
+            </div>
+            
+            {/* Sidebar Code Content */}
+            <div className="p-4 overflow-y-auto flex-1">
+              <pre className="m-0 text-sm font-mono whitespace-pre-wrap break-words">
+                <code>
+                  {selectedNode.data.code ? String(selectedNode.data.code) : "# No source code available for this node"}
+                </code>
+              </pre>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
