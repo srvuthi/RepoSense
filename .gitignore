@@ -5,3 +5,4 @@ __pycache__/
 
 # Temp directories
 temp_repos/
+chroma_data/

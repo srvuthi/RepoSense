@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+gitpython
+requests
+pydantic
+python-dotenv
+tree-sitter
+tree-sitter-python
+tree-sitter-javascript
+tree-sitter-typescript
+networkx
+sentence-transformers
+chromadb
+groq
+slowapi
