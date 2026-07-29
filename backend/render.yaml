@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: reposense-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    # sentence-transformers pulls in torch; the default PyPI wheel bundles
+    # CUDA libraries we never use on Render's CPU-only instances, bloating
+    # the install and runtime memory. Installing the CPU-only build first
+    # keeps this well under free-tier limits.
+    buildCommand: >-
+      pip install torch --index-url https://download.pytorch.org/whl/cpu &&
+      pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_MODEL
+        sync: false
+      - key: FRONTEND_ORIGIN
+        sync: false
+    healthCheckPath: /docs
