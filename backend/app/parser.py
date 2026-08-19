@@ -35,6 +35,22 @@ CHUNK_NODE_TYPES = {
 
 IGNORED_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
+# Unresolved imports are collapsed into one node per ecosystem instead of one
+# node per package, so a repo with 60 npm imports doesn't render 60 dashed
+# boxes. JS and TS share a node since both resolve through npm.
+EXTERNAL_GROUPS = {
+    "python": ("external-group:python", "Python Dependencies"),
+    "javascript": ("external-group:js", "JS / TS Dependencies"),
+    "typescript": ("external-group:js", "JS / TS Dependencies"),
+}
+
+# Tree-sitter node type for a function/method call expression, per language.
+CALL_NODE_TYPES = {
+    "python": "call",
+    "javascript": "call_expression",
+    "typescript": "call_expression",
+}
+
 
 def _is_chunk_node(node, language: str) -> bool:
     if node.type in CHUNK_NODE_TYPES[language]:
@@ -161,6 +177,34 @@ def extract_chunks(language: str, source: bytes, file_path: str, module_name: st
     return chunks
 
 
+def _extract_called_names(language: str, source: bytes) -> set[str]:
+    """Returns the short (unqualified) name of every function/method called in
+    `source` - e.g. both `foo()` and `self.foo()` contribute "foo". Used as a
+    best-effort heuristic to link import edges to the specific functions they're
+    actually used for; it's name-matching, not full scope resolution, so it can
+    both miss calls (aliased imports) and over-match (two files that each
+    happen to define a same-named function)."""
+    tree = _PARSERS[language].parse(source)
+    call_type = CALL_NODE_TYPES[language]
+    names = set()
+
+    def visit(node):
+        if node.type == call_type:
+            func = node.child_by_field_name("function")
+            if func is not None:
+                if func.type in ("identifier", "property_identifier"):
+                    names.add(_text(func, source))
+                elif func.type in ("attribute", "member_expression"):
+                    attr = func.child_by_field_name("attribute") or func.child_by_field_name("property")
+                    if attr is not None:
+                        names.add(_text(attr, source))
+        for child in node.children:
+            visit(child)
+
+    visit(tree.root_node)
+    return names
+
+
 # ---------------------------------------------------------------------------
 # Import resolution: raw import string -> repo-relative file-node id
 # ---------------------------------------------------------------------------
@@ -250,15 +294,25 @@ def build_dependency_graph(repo_path: str) -> dict:
                 source = f.read()
 
             chunks = extract_chunks(language, source, rel_id, module_name)
+            called_names: set[str] = set()
+            for chunk in chunks:
+                called_names |= _extract_called_names(language, chunk["source"].encode("utf8"))
+
             graph.add_node(
                 rel_id,
                 label=filename,
                 type="file",
                 language=language,
+                folder=os.path.dirname(rel_id),
                 code=source.decode("utf8", errors="replace"),
                 chunks=chunks,
             )
-            files[rel_id] = {"language": language, "source": source}
+            files[rel_id] = {
+                "language": language,
+                "source": source,
+                "chunks": chunks,
+                "called_names": called_names,
+            }
 
     all_ids = set(files.keys())
 
@@ -266,27 +320,66 @@ def build_dependency_graph(repo_path: str) -> dict:
         imports = extract_imports(info["language"], info["source"])
         for imp in imports:
             target_id = resolve_import(info["language"], imp, rel_id, all_ids)
-            edge_type = "imports"
 
-            if target_id is None:
-                target_id = f"external:{imp}"
-                edge_type = "imports-external"
-                if not graph.has_node(target_id):
-                    graph.add_node(target_id, label=imp, type="external", language=None, code=None)
+            if target_id is not None:
+                if not graph.has_edge(rel_id, target_id):
+                    graph.add_edge(rel_id, target_id, id=f"edge-{rel_id}-to-{target_id}", type="imports")
+                continue
 
-            if not graph.has_edge(rel_id, target_id):
-                graph.add_edge(rel_id, target_id, id=f"edge-{rel_id}-to-{target_id}", type=edge_type)
+            # Unresolved: route to this file's ecosystem group node instead of
+            # creating a one-off node per package.
+            group_id, group_label = EXTERNAL_GROUPS[info["language"]]
+            if not graph.has_node(group_id):
+                graph.add_node(
+                    group_id, label=group_label, type="external-group", language=None, code=None,
+                    dependencies=set(),
+                )
+            graph.nodes[group_id]["dependencies"].add(imp)
+
+            if graph.has_edge(rel_id, group_id):
+                graph.edges[rel_id, group_id]["packages"].add(imp)
+            else:
+                graph.add_edge(
+                    rel_id, group_id, id=f"edge-{rel_id}-to-{group_id}", type="imports-external",
+                    packages={imp},
+                )
+
+    # Second pass: for each resolved file->file import edge, narrow it down to
+    # the specific functions actually called across that edge (best-effort
+    # name matching - see _extract_called_names).
+    for rel_id, info in files.items():
+        for target_id in list(graph.successors(rel_id)):
+            edge_data = graph.edges[rel_id, target_id]
+            if edge_data.get("type") != "imports":
+                continue
+            target_info = files.get(target_id)
+            if target_info is None:
+                continue
+            target_short_names = {c["name"].split(".")[-1] for c in target_info["chunks"]}
+            matched = info["called_names"] & target_short_names
+            if matched:
+                edge_data["calls"] = matched
 
     return _export_graph(graph)
 
 
 def _export_graph(graph: nx.DiGraph) -> dict:
-    nodes = [
-        {"id": node_id, "position": {"x": 0, "y": 0}, "data": dict(data)}
-        for node_id, data in graph.nodes(data=True)
-    ]
-    edges = [
-        {"id": data["id"], "source": u, "target": v, "type": data["type"]}
-        for u, v, data in graph.edges(data=True)
-    ]
+    nodes = []
+    for node_id, data in graph.nodes(data=True):
+        clean = dict(data)
+        if isinstance(clean.get("dependencies"), set):
+            clean["dependencies"] = sorted(clean["dependencies"])
+        nodes.append({"id": node_id, "position": {"x": 0, "y": 0}, "data": clean})
+
+    edges = []
+    for u, v, data in graph.edges(data=True):
+        clean = dict(data)
+        if isinstance(clean.get("packages"), set):
+            clean["packages"] = sorted(clean["packages"])
+        if isinstance(clean.get("calls"), set):
+            clean["calls"] = sorted(clean["calls"])
+        edge_id = clean.pop("id")
+        edge_type = clean.pop("type")
+        edges.append({"id": edge_id, "source": u, "target": v, "type": edge_type, **clean})
+
     return {"nodes": nodes, "edges": edges}

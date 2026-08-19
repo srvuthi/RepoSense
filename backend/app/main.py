@@ -51,7 +51,7 @@ else:
         allow_headers=["*"],
     )
 
-MAX_SIZE_KB = 100 * 1024  # 100MB cap in kilobytes
+MAX_SIZE_KB = 1024 * 1024  # 1GB cap in kilobytes
 
 class RepoRequest(BaseModel):
     repo_url: str
@@ -140,7 +140,7 @@ class ChatRequest(BaseModel):
 @app.post("/chat")
 @limiter.limit("15/minute")
 async def chat(request: Request, body: ChatRequest):
-    chunks = retrieve_chunks(body.job_id, body.message, top_k=5, scope=body.scope)
+    chunks = retrieve_chunks(body.job_id, body.message, top_k=12, scope=body.scope)
 
     if not chunks:
         return {
